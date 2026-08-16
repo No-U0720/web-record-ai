@@ -10,11 +10,15 @@ def main():
     print("🤖 啟動 USB 鏡頭 AI 萬物通用識別系統")
     print("========================================")
 
-    # 載入專屬訓練好的橡皮筋顏色 AI 模型 (rubber_band_color_best.pt)
-    model_name = "rubber_band_color_best.pt"
+    # 載入專屬 AI 模型 (優先使用 ONNX 格式以利樹莓派硬體加速)
+    model_name = "rubber_band_color_best.onnx"
+    if not os.path.exists(model_name):
+        model_name = "best.onnx"
+    if not os.path.exists(model_name):
+        model_name = "rubber_band_color_best.pt"
     if not os.path.exists(model_name):
         model_name = "best.pt"
-    print(f"📦 正在載入全新專屬橡皮筋 AI 模型: {model_name}")
+    print(f"📦 正在載入 AI 模型: {model_name}")
     model = YOLO(model_name)
 
     # 1. 開啟 USB 攝影機

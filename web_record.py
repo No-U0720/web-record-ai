@@ -10,7 +10,11 @@ app = Flask(__name__)
 
 # ===== 全域變數與模型初始化 =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "rubber_band_color_best.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "rubber_band_color_best.onnx")
+if not os.path.exists(MODEL_PATH):
+    MODEL_PATH = os.path.join(BASE_DIR, "best.onnx")
+if not os.path.exists(MODEL_PATH):
+    MODEL_PATH = os.path.join(BASE_DIR, "rubber_band_color_best.pt")
 if not os.path.exists(MODEL_PATH):
     MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
