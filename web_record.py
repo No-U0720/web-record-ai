@@ -48,66 +48,54 @@ color_bgr_map = {
     "Green": (90, 222, 74)
 }
 
-def camera_loop():
-    global cap, is_recording, video_writer, rec_start_time, latest_stats, latest_jpeg, latest_raw_frame
-    
-    print("📸 正在啟動攝影機...")
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    # 樹莓派 5 最佳實時解析度 1280x720 (兼顧 30 FPS 超流暢度與 720P 高清)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    cap.set(cv2.CAP_PROP_FPS, 30)
+# ===== 異步 AI 推論工作佇列與最新檢測結果 =====
+inference_lock = threading.Lock()
+latest_boxes = []
+latest_band_counts = {"Red": 0, "Yellow": 0, "Green": 0}
+latest_paper_cnt = None
+raw_frame_queue = None
 
-    if not cap.isOpened():
-        print("⚠️ 警告：無法開啟攝影機 0，將持續嘗試...")
-
+def ai_inference_worker():
+    """專屬 AI 異步推論線程：以極限速度持續推論，不阻塞相機讀取與串流"""
+    global latest_boxes, latest_band_counts, latest_paper_cnt
     while True:
-        if cap is None or not cap.isOpened():
-            time.sleep(1.0)
-            cap = cv2.VideoCapture(0)
-            continue
-        
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            time.sleep(0.02)
-            continue
-
         with lock:
-            latest_raw_frame = frame.copy()
+            if latest_raw_frame is None:
+                time.sleep(0.02)
+                continue
+            cur_frame = latest_raw_frame.copy()
 
-        # ⚡ 執行 YOLO AI 模型推論 (指定 imgsz=480 大幅降低推論耗時，FPS 提升 3 倍)
-        results = model.predict(frame, imgsz=480, conf=0.35, verbose=False)[0]
-        frame_h, frame_w = frame.shape[:2]
-        scale_f = max(1.0, frame_w / 1280.0)
+        h, w = cur_frame.shape[:2]
 
-        # 📄 白紙 ROI 檢測
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # 1. 快速白紙 ROI (降採樣 4 倍加速色彩遮罩計算)
+        small_frame = cv2.resize(cur_frame, (w // 4, h // 4))
+        hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
         white_paper_lower = np.array([0, 0, 160])
         white_paper_upper = np.array([180, 60, 255])
         paper_mask = cv2.inRange(hsv, white_paper_lower, white_paper_upper)
         
-        kernel_paper = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_CLOSE, kernel_paper)
-        paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_OPEN, kernel_paper)
-        
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_OPEN, kernel)
         paper_contours, _ = cv2.findContours(paper_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        paper_cnt = None
+        
+        cur_paper_cnt = None
         if paper_contours:
             max_cnt = max(paper_contours, key=cv2.contourArea)
-            if cv2.contourArea(max_cnt) > 10000:
-                paper_cnt = max_cnt
-                cv2.drawContours(frame, [paper_cnt], -1, (255, 255, 0), 2)
-                cv2.putText(frame, "White Paper ROI", (paper_cnt[0][0][0], max(30, paper_cnt[0][0][1] - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.75 * scale_f, (255, 255, 0), 2, cv2.LINE_AA)
+            if cv2.contourArea(max_cnt) > 800:
+                # 還原坐標比例回原始大小
+                cur_paper_cnt = (max_cnt * 4).astype(np.int32)
 
         def is_inside_paper(cx, cy):
-            if paper_cnt is None:
+            if cur_paper_cnt is None:
                 return True
-            return cv2.pointPolygonTest(paper_cnt, (float(cx), float(cy)), False) >= 0
+            return cv2.pointPolygonTest(cur_paper_cnt, (float(cx), float(cy)), False) >= 0
 
-        # 統計與畫框
-        band_counts = {"Red": 0, "Yellow": 0, "Green": 0}
+        # 2. ⚡ 執行 YOLO ONNX 模型推論 (imgsz=320 邊緣運算極致速度)
+        results = model.predict(cur_frame, imgsz=320, conf=0.35, verbose=False)[0]
+        
+        detected_boxes = []
+        b_counts = {"Red": 0, "Yellow": 0, "Green": 0}
+
         if results.boxes is not None:
             for box in results.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
@@ -120,18 +108,71 @@ def camera_loop():
                 conf = float(box.conf[0].cpu().numpy())
                 cls_name = model.names[cls_id] if hasattr(model, 'names') else f"Class {cls_id}"
 
-                if cls_name in band_counts:
-                    band_counts[cls_name] += 1
+                if cls_name in b_counts:
+                    b_counts[cls_name] += 1
 
-                color = color_bgr_map.get(cls_name, (0, 255, 255))
-                label = f"{cls_name} ({int(conf*100)}%)"
+                detected_boxes.append((x1, y1, x2, y2, cls_name, conf))
 
-                line_thick = max(2, int(3 * scale_f))
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, line_thick)
-                cv2.putText(frame, label, (x1, max(30, y1 - int(10 * scale_f))),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65 * scale_f, color, line_thick, cv2.LINE_AA)
+        with inference_lock:
+            latest_boxes = detected_boxes
+            latest_band_counts = b_counts
+            latest_paper_cnt = cur_paper_cnt
 
-        total_bands = sum(band_counts.values())
+        time.sleep(0.005)
+
+def camera_loop():
+    global cap, is_recording, video_writer, rec_start_time, latest_stats, latest_jpeg, latest_raw_frame
+    
+    print("📸 正在啟動高幀率攝影機串流...")
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    # 啟動背景 AI 異步推論線程
+    ai_thread = threading.Thread(target=ai_inference_worker, daemon=True)
+    ai_thread.start()
+
+    while True:
+        if cap is None or not cap.isOpened():
+            time.sleep(0.5)
+            cap = cv2.VideoCapture(0)
+            continue
+        
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            time.sleep(0.01)
+            continue
+
+        with lock:
+            latest_raw_frame = frame
+
+        frame_h, frame_w = frame.shape[:2]
+        scale_f = max(1.0, frame_w / 1280.0)
+
+        # 獲取最新異步推論結果 (無延遲疊加渲染)
+        with inference_lock:
+            cur_boxes = list(latest_boxes)
+            cur_counts = dict(latest_band_counts)
+            cur_paper = latest_paper_cnt
+
+        # 繪製白紙區域
+        if cur_paper is not None:
+            cv2.drawContours(frame, [cur_paper], -1, (255, 255, 0), 2)
+            cv2.putText(frame, "White Paper ROI", (cur_paper[0][0][0], max(30, cur_paper[0][0][1] - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75 * scale_f, (255, 255, 0), 2, cv2.LINE_AA)
+
+        # 繪製物件框
+        for (x1, y1, x2, y2, cls_name, conf) in cur_boxes:
+            color = color_bgr_map.get(cls_name, (0, 255, 255))
+            label = f"{cls_name} ({int(conf*100)}%)"
+            line_thick = max(2, int(3 * scale_f))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, line_thick)
+            cv2.putText(frame, label, (x1, max(30, y1 - int(10 * scale_f))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65 * scale_f, color, line_thick, cv2.LINE_AA)
+
+        total_bands = sum(cur_counts.values())
 
         # 📊 左上角水晶玻璃看板 (Glassmorphism HUD)
         hud_w, hud_h = int(580 * scale_f), int(260 * scale_f)
@@ -157,7 +198,7 @@ def camera_loop():
         item_scale = 0.75 * scale_f
         item_thick = max(2, int(2 * scale_f))
 
-        for c_name, count in band_counts.items():
+        for c_name, count in cur_counts.items():
             bgr = color_bgr_map.get(c_name, (255, 255, 255))
             txt = f"• {c_name}: {count}"
             cv2.putText(frame, txt, (pad + int(25 * scale_f), y_offset + 2),
@@ -208,22 +249,22 @@ def camera_loop():
             cv2.putText(frame, f"REC {rec_dur_str}", (rec_x, rec_y),
                         cv2.FONT_HERSHEY_SIMPLEX, rec_scale, (0, 0, 255), max(2, int(3 * scale_f)), cv2.LINE_AA)
 
-        # 更新最新統計狀態與壓縮圖片 (品質 70，體積大幅縮小 60%，網路傳輸極速)
-        ret_enc, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        # 高速串流 JPEG 編碼 (Turbo 速度，保證 30 FPS 極限順暢)
+        ret_enc, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
         if ret_enc:
             frame_data = jpeg.tobytes()
             with lock:
                 latest_jpeg = frame_data
                 latest_stats = {
-                    "Red": band_counts["Red"],
-                    "Yellow": band_counts["Yellow"],
-                    "Green": band_counts["Green"],
+                    "Red": cur_counts["Red"],
+                    "Yellow": cur_counts["Yellow"],
+                    "Green": cur_counts["Green"],
                     "Total": total_bands,
                     "is_recording": is_recording,
                     "rec_duration": rec_dur_str
                 }
         
-        time.sleep(0.01)
+        time.sleep(0.005)
 
 def ensure_camera_started():
     global camera_thread
@@ -238,14 +279,14 @@ def generate_frames():
             frame_bytes = latest_jpeg
         
         if frame_bytes is None:
-            time.sleep(0.05)
+            time.sleep(0.02)
             continue
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n'
                b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n' +
                frame_bytes + b'\r\n')
-        time.sleep(0.033)
+        time.sleep(0.02)
 
 # HTML 前端頁面模板 (極簡高端深色毛玻璃設計)
 HTML_TEMPLATE = """
