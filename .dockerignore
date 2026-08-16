@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.git
+.vscode
+*.mp4
+*.avi
+runs/
+annotated_previews/
+outputs/
+test_results/

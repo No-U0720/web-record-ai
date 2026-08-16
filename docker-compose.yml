@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  web_record:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: web_record_ai:latest
+    container_name: web_record_ai
+    restart: unless-stopped
+    ports:
+      - "5003:5003"
+    devices:
+      # 掛載 USB 鏡頭設備 (Linux / 樹莓派標準配置)
+      - "/dev/video0:/dev/video0"
+    volumes:
+      # 掛載本機資料夾，保存錄影與照片
+      - ./count:/app/count
+      - ./captures:/app/captures
+      - ./dataset_record:/app/dataset_record
+    environment:
+      - PYTHONUNBUFFERED=1
