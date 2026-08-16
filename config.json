@@ -1,0 +1,24 @@
+{
+    "line_y_ratio": 0.6,
+    "iou_threshold": 0.6,
+    "conf_threshold": 0.35,
+    "tracker": "bytetrack.yaml",
+    "db_host": "192.168.0.40:5432",
+    "db_port": 5432,
+    "db_name": "steelmill_db",
+    "mqtt_broker": "192.168.0.40:1883",
+    "mqtt_port": 1883,
+    "mqtt_topic": "vizcounter/steelmill/line1/count",
+    "counter_name": "SteelMill_Line1_Counter",
+    "video_source": "HA.mp4",
+    "detection_mode": "hsv_hot_metal",
+    "line_coords": {
+        "x1": 0,
+        "y1": 624,
+        "x2": 540,
+        "y2": 624
+    },
+    "primary_direction": "top_to_bottom",
+    "imgsz": 416,
+    "tracker_type": "bytetrack.yaml"
+}
