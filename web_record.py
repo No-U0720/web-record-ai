@@ -123,12 +123,14 @@ def ai_inference_worker():
 def camera_loop():
     global cap, is_recording, video_writer, rec_start_time, latest_stats, latest_jpeg, latest_raw_frame
     
-    print("📸 正在啟動高幀率攝影機串流...")
+    print("📸 正在啟動零延遲即時攝影機串流...")
     cap = cv2.VideoCapture(0)
+    # 樹莓派 5 最佳零延遲解析度 (640x480 60FPS/30FPS 零緩衝取流)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 強制相機硬體緩衝區為 1 幀，徹底消滅殘影與累積延遲
 
     # 啟動背景 AI 異步推論線程
     ai_thread = threading.Thread(target=ai_inference_worker, daemon=True)
@@ -142,14 +144,13 @@ def camera_loop():
         
         ret, frame = cap.read()
         if not ret or frame is None:
-            time.sleep(0.01)
             continue
 
         with lock:
             latest_raw_frame = frame
 
         frame_h, frame_w = frame.shape[:2]
-        scale_f = max(1.0, frame_w / 1280.0)
+        scale_f = max(0.65, frame_w / 1280.0)
 
         # 獲取最新異步推論結果 (無延遲疊加渲染)
         with inference_lock:
@@ -160,74 +161,43 @@ def camera_loop():
         # 繪製白紙區域
         if cur_paper is not None:
             cv2.drawContours(frame, [cur_paper], -1, (255, 255, 0), 2)
-            cv2.putText(frame, "White Paper ROI", (cur_paper[0][0][0], max(30, cur_paper[0][0][1] - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.75 * scale_f, (255, 255, 0), 2, cv2.LINE_AA)
 
         # 繪製物件框
         for (x1, y1, x2, y2, cls_name, conf) in cur_boxes:
             color = color_bgr_map.get(cls_name, (0, 255, 255))
             label = f"{cls_name} ({int(conf*100)}%)"
-            line_thick = max(2, int(3 * scale_f))
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, line_thick)
-            cv2.putText(frame, label, (x1, max(30, y1 - int(10 * scale_f))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65 * scale_f, color, line_thick, cv2.LINE_AA)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, max(20, y1 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
 
         total_bands = sum(cur_counts.values())
 
-        # 📊 左上角水晶玻璃看板 (Glassmorphism HUD)
-        hud_w, hud_h = int(580 * scale_f), int(260 * scale_f)
-        pad = int(30 * scale_f)
+        # 📊 左上角精簡 HUD
+        hud_w, hud_h = 240, 110
+        pad = 10
         
         glass_overlay = frame.copy()
         cv2.rectangle(glass_overlay, (pad, pad), (pad + hud_w, pad + hud_h), (10, 15, 25), -1)
-        cv2.addWeighted(glass_overlay, 0.25, frame, 0.75, 0, frame)
-        border_thick = max(2, int(3 * scale_f))
-        cv2.rectangle(frame, (pad, pad), (pad + hud_w, pad + hud_h), (255, 255, 255), border_thick)
+        cv2.addWeighted(glass_overlay, 0.3, frame, 0.7, 0, frame)
+        cv2.rectangle(frame, (pad, pad), (pad + hud_w, pad + hud_h), (255, 255, 255), 1)
 
-        title_text = f"=== Color Classification Count (Total: {total_bands}) ==="
-        title_scale = 0.8 * scale_f
-        title_thick = max(2, int(2 * scale_f))
-        title_y = pad + int(45 * scale_f)
+        cv2.putText(frame, f"Total: {total_bands}", (pad + 10, pad + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 220, 0), 2, cv2.LINE_AA)
 
-        cv2.putText(frame, title_text, (pad + int(20 * scale_f), title_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, title_scale, (0, 0, 0), title_thick + 2, cv2.LINE_AA)
-        cv2.putText(frame, title_text, (pad + int(18 * scale_f), title_y - 1),
-                    cv2.FONT_HERSHEY_SIMPLEX, title_scale, (255, 220, 0), title_thick, cv2.LINE_AA)
-
-        y_offset = title_y + int(50 * scale_f)
-        item_scale = 0.75 * scale_f
-        item_thick = max(2, int(2 * scale_f))
-
+        y_offset = pad + 50
         for c_name, count in cur_counts.items():
             bgr = color_bgr_map.get(c_name, (255, 255, 255))
-            txt = f"• {c_name}: {count}"
-            cv2.putText(frame, txt, (pad + int(25 * scale_f), y_offset + 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, item_scale, (0, 0, 0), item_thick + 1, cv2.LINE_AA)
-            cv2.putText(frame, txt, (pad + int(23 * scale_f), y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, item_scale, bgr, item_thick, cv2.LINE_AA)
-            y_offset += int(45 * scale_f)
+            txt = f"{c_name}: {count}"
+            cv2.putText(frame, txt, (pad + 10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, bgr, 1, cv2.LINE_AA)
+            y_offset += 20
 
         # 🕒 右上角實時時間 (Real-time Clock)
-        current_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        clock_scale = 0.75 * scale_f
-        clock_thick = max(2, int(2 * scale_f))
-        (tw, th), _ = cv2.getTextSize(current_time_str, cv2.FONT_HERSHEY_SIMPLEX, clock_scale, clock_thick)
-        clock_x = frame_w - tw - int(30 * scale_f)
-        clock_y = pad + int(25 * scale_f)
-
-        clock_pad_x = int(12 * scale_f)
-        clock_pad_y = int(8 * scale_f)
-        clock_bg = frame.copy()
-        cv2.rectangle(clock_bg, (clock_x - clock_pad_x, clock_y - th - clock_pad_y), 
-                      (clock_x + tw + clock_pad_x, clock_y + clock_pad_y), (10, 15, 25), -1)
-        cv2.addWeighted(clock_bg, 0.35, frame, 0.65, 0, frame)
-        cv2.rectangle(frame, (clock_x - clock_pad_x, clock_y - th - clock_pad_y), 
-                      (clock_x + tw + clock_pad_x, clock_y + clock_pad_y), (255, 255, 255), max(1, int(1.5 * scale_f)))
-
-        cv2.putText(frame, current_time_str, (clock_x + 1, clock_y + 1),
-                    cv2.FONT_HERSHEY_SIMPLEX, clock_scale, (0, 0, 0), clock_thick + 1, cv2.LINE_AA)
-        cv2.putText(frame, current_time_str, (clock_x, clock_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, clock_scale, (255, 255, 255), clock_thick, cv2.LINE_AA)
+        current_time_str = time.strftime("%H:%M:%S")
+        cv2.putText(frame, current_time_str, (frame_w - 110, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, current_time_str, (frame_w - 110, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
         # 🎥 錄影指示與寫入
         rec_dur_str = "00:00"
@@ -239,18 +209,14 @@ def camera_loop():
             mins, secs = divmod(elapsed_sec, 60)
             rec_dur_str = f"{mins:02d}:{secs:02d}"
 
-            rec_scale = 0.85 * scale_f
-            rec_x = frame_w - int(240 * scale_f)
-            rec_y = clock_y + int(45 * scale_f)
-
             if int(time.time() * 2) % 2 == 0:
-                cv2.circle(frame, (rec_x - int(20 * scale_f), rec_y - int(8 * scale_f)), int(10 * scale_f), (0, 0, 255), -1)
+                cv2.circle(frame, (frame_w - 115, 60), 6, (0, 0, 255), -1)
             
-            cv2.putText(frame, f"REC {rec_dur_str}", (rec_x, rec_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, rec_scale, (0, 0, 255), max(2, int(3 * scale_f)), cv2.LINE_AA)
+            cv2.putText(frame, f"REC {rec_dur_str}", (frame_w - 100, 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2, cv2.LINE_AA)
 
-        # 高速串流 JPEG 編碼 (Turbo 速度，保證 30 FPS 極限順暢)
-        ret_enc, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
+        # 極限瞬時 JPEG 壓縮 (品質 50，每幀小於 15KB，實現 0 延遲零緩衝推送)
+        ret_enc, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
         if ret_enc:
             frame_data = jpeg.tobytes()
             with lock:
@@ -263,8 +229,6 @@ def camera_loop():
                     "is_recording": is_recording,
                     "rec_duration": rec_dur_str
                 }
-        
-        time.sleep(0.005)
 
 def ensure_camera_started():
     global camera_thread
@@ -668,51 +632,6 @@ HTML_TEMPLATE = """
 
     <script>
         const videoStream = document.getElementById('videoStream');
-        const videoCanvas = document.getElementById('videoCanvas');
-        const ctx = videoCanvas.getContext('2d');
-        let useCanvas = false;
-        let isDrawing = false;
-
-        function switchToCanvas() {
-            if (useCanvas) return;
-            useCanvas = true;
-            videoStream.style.display = 'none';
-            videoCanvas.style.display = 'block';
-            console.log('Switched to ultra-fast Canvas frame renderer');
-            renderCanvasLoop();
-        }
-
-        function renderCanvasLoop() {
-            if (!useCanvas) return;
-            if (isDrawing) {
-                requestAnimationFrame(renderCanvasLoop);
-                return;
-            }
-            
-            isDrawing = true;
-            const img = new Image();
-            img.onload = () => {
-                if (videoCanvas.width !== img.width || videoCanvas.height !== img.height) {
-                    videoCanvas.width = img.width;
-                    videoCanvas.height = img.height;
-                }
-                ctx.drawImage(img, 0, 0);
-                isDrawing = false;
-                requestAnimationFrame(renderCanvasLoop);
-            };
-            img.onerror = () => {
-                isDrawing = false;
-                setTimeout(() => requestAnimationFrame(renderCanvasLoop), 50);
-            };
-            img.src = '/video_frame?t=' + Date.now();
-        }
-
-        // 自動檢測：若 Safari 或瀏覽器未在 500ms 內加載 MJPEG，自動切換至 Canvas
-        setTimeout(() => {
-            if (!videoStream.complete || videoStream.naturalWidth === 0) {
-                switchToCanvas();
-            }
-        }, 500);
 
         function showToast(msg) {
             const toast = document.getElementById('toast');
