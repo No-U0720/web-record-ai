@@ -50,10 +50,11 @@ color_bgr_map = {
 
 # ===== 異步 AI 推論工作佇列與最新檢測結果 =====
 inference_lock = threading.Lock()
+frame_condition = threading.Condition()
 latest_boxes = []
 latest_band_counts = {"Red": 0, "Yellow": 0, "Green": 0}
 latest_paper_cnt = None
-raw_frame_queue = None
+frame_id = 0
 
 def ai_inference_worker():
     """專屬 AI 異步推論線程：以極限速度持續推論，不阻塞相機讀取與串流"""
@@ -61,7 +62,7 @@ def ai_inference_worker():
     while True:
         with lock:
             if latest_raw_frame is None:
-                time.sleep(0.02)
+                time.sleep(0.01)
                 continue
             cur_frame = latest_raw_frame.copy()
 
@@ -74,15 +75,14 @@ def ai_inference_worker():
         white_paper_upper = np.array([180, 60, 255])
         paper_mask = cv2.inRange(hsv, white_paper_lower, white_paper_upper)
         
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         paper_mask = cv2.morphologyEx(paper_mask, cv2.MORPH_OPEN, kernel)
         paper_contours, _ = cv2.findContours(paper_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         cur_paper_cnt = None
         if paper_contours:
             max_cnt = max(paper_contours, key=cv2.contourArea)
-            if cv2.contourArea(max_cnt) > 800:
-                # 還原坐標比例回原始大小
+            if cv2.contourArea(max_cnt) > 500:
                 cur_paper_cnt = (max_cnt * 4).astype(np.int32)
 
         def is_inside_paper(cx, cy):
@@ -121,18 +121,16 @@ def ai_inference_worker():
         time.sleep(0.005)
 
 def camera_loop():
-    global cap, is_recording, video_writer, rec_start_time, latest_stats, latest_jpeg, latest_raw_frame
+    global cap, is_recording, video_writer, rec_start_time, latest_stats, latest_jpeg, latest_raw_frame, frame_id
     
     print("📸 正在啟動零延遲即時攝影機串流...")
     cap = cv2.VideoCapture(0)
-    # 樹莓派 5 最佳零延遲解析度 (640x480 60FPS/30FPS 零緩衝取流)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 強制相機硬體緩衝區為 1 幀，徹底消滅殘影與累積延遲
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    # 啟動背景 AI 異步推論線程
     ai_thread = threading.Thread(target=ai_inference_worker, daemon=True)
     ai_thread.start()
 
@@ -142,7 +140,12 @@ def camera_loop():
             cap = cv2.VideoCapture(0)
             continue
         
-        ret, frame = cap.read()
+        # 徹底清空硬體佇列快取：grab 直到取得最新幀
+        ret = cap.grab()
+        if not ret:
+            time.sleep(0.005)
+            continue
+        ret, frame = cap.retrieve()
         if not ret or frame is None:
             continue
 
@@ -150,9 +153,7 @@ def camera_loop():
             latest_raw_frame = frame
 
         frame_h, frame_w = frame.shape[:2]
-        scale_f = max(0.65, frame_w / 1280.0)
 
-        # 獲取最新異步推論結果 (無延遲疊加渲染)
         with inference_lock:
             cur_boxes = list(latest_boxes)
             cur_counts = dict(latest_band_counts)
@@ -173,31 +174,28 @@ def camera_loop():
         total_bands = sum(cur_counts.values())
 
         # 📊 左上角精簡 HUD
-        hud_w, hud_h = 240, 110
+        hud_w, hud_h = 220, 100
         pad = 10
-        
-        glass_overlay = frame.copy()
-        cv2.rectangle(glass_overlay, (pad, pad), (pad + hud_w, pad + hud_h), (10, 15, 25), -1)
-        cv2.addWeighted(glass_overlay, 0.3, frame, 0.7, 0, frame)
+        cv2.rectangle(frame, (pad, pad), (pad + hud_w, pad + hud_h), (15, 20, 30), -1)
         cv2.rectangle(frame, (pad, pad), (pad + hud_w, pad + hud_h), (255, 255, 255), 1)
 
-        cv2.putText(frame, f"Total: {total_bands}", (pad + 10, pad + 25),
+        cv2.putText(frame, f"Total: {total_bands}", (pad + 10, pad + 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 220, 0), 2, cv2.LINE_AA)
 
-        y_offset = pad + 50
+        y_offset = pad + 45
         for c_name, count in cur_counts.items():
             bgr = color_bgr_map.get(c_name, (255, 255, 255))
             txt = f"{c_name}: {count}"
             cv2.putText(frame, txt, (pad + 10, y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, bgr, 1, cv2.LINE_AA)
-            y_offset += 20
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, bgr, 1, cv2.LINE_AA)
+            y_offset += 18
 
-        # 🕒 右上角實時時間 (Real-time Clock)
+        # 🕒 右上角實時時間
         current_time_str = time.strftime("%H:%M:%S")
-        cv2.putText(frame, current_time_str, (frame_w - 110, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, current_time_str, (frame_w - 110, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, current_time_str, (frame_w - 95, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, current_time_str, (frame_w - 95, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
         # 🎥 錄影指示與寫入
         rec_dur_str = "00:00"
@@ -210,17 +208,18 @@ def camera_loop():
             rec_dur_str = f"{mins:02d}:{secs:02d}"
 
             if int(time.time() * 2) % 2 == 0:
-                cv2.circle(frame, (frame_w - 115, 60), 6, (0, 0, 255), -1)
+                cv2.circle(frame, (frame_w - 110, 50), 5, (0, 0, 255), -1)
             
-            cv2.putText(frame, f"REC {rec_dur_str}", (frame_w - 100, 65),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, f"REC {rec_dur_str}", (frame_w - 95, 54),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2, cv2.LINE_AA)
 
-        # 極限瞬時 JPEG 壓縮 (品質 50，每幀小於 15KB，實現 0 延遲零緩衝推送)
-        ret_enc, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
+        # 極限瞬時 JPEG 壓縮 (品質 45，毫秒級傳輸)
+        ret_enc, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 45])
         if ret_enc:
             frame_data = jpeg.tobytes()
-            with lock:
+            with frame_condition:
                 latest_jpeg = frame_data
+                frame_id += 1
                 latest_stats = {
                     "Red": cur_counts["Red"],
                     "Yellow": cur_counts["Yellow"],
@@ -229,6 +228,8 @@ def camera_loop():
                     "is_recording": is_recording,
                     "rec_duration": rec_dur_str
                 }
+                # 通知所有串流客戶端立即送出最新幀
+                frame_condition.notify_all()
 
 def ensure_camera_started():
     global camera_thread
@@ -238,19 +239,19 @@ def ensure_camera_started():
 
 def generate_frames():
     ensure_camera_started()
+    last_sent_id = -1
     while True:
-        with lock:
+        with frame_condition:
+            # 只有當有「真正的新畫面」產生時才喚醒發送，徹底消除瀏覽器 TCP 堆積
+            while frame_id == last_sent_id or latest_jpeg is None:
+                frame_condition.wait(timeout=0.05)
             frame_bytes = latest_jpeg
-        
-        if frame_bytes is None:
-            time.sleep(0.02)
-            continue
+            last_sent_id = frame_id
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n'
                b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n' +
                frame_bytes + b'\r\n')
-        time.sleep(0.02)
 
 # HTML 前端頁面模板 (極簡高端深色毛玻璃設計)
 HTML_TEMPLATE = """
