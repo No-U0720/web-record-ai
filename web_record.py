@@ -578,8 +578,7 @@ HTML_TEMPLATE = """
     <main>
         <div class="video-card">
             <div class="video-container">
-                <canvas id="videoCanvas" class="video-stream" style="display:none;"></canvas>
-                <img id="videoStream" src="/video_feed" class="video-stream" alt="AI Camera Stream" onerror="switchToCanvas()">
+                <img id="videoStream" class="video-stream" alt="AI Camera Stream" src="/video_frame">
             </div>
             <div class="controls-bar">
                 <button class="btn btn-snap" onclick="takeSnapshot()">
@@ -633,6 +632,27 @@ HTML_TEMPLATE = """
 
     <script>
         const videoStream = document.getElementById('videoStream');
+        let isFetchingFrame = false;
+
+        // 🚀 極限零延遲渲染循環：當前幀渲染完成才請求下一幀，保證 100% 永遠是當下最新幀，延遲 0ms！
+        function streamLoop() {
+            if (isFetchingFrame) return;
+            isFetchingFrame = true;
+
+            const nextImg = new Image();
+            nextImg.onload = () => {
+                videoStream.src = nextImg.src;
+                isFetchingFrame = false;
+                requestAnimationFrame(streamLoop);
+            };
+            nextImg.onerror = () => {
+                isFetchingFrame = false;
+                setTimeout(() => requestAnimationFrame(streamLoop), 30);
+            };
+            nextImg.src = '/video_frame?t=' + Date.now();
+        }
+
+        requestAnimationFrame(streamLoop);
 
         function showToast(msg) {
             const toast = document.getElementById('toast');
