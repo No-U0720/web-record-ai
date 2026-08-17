@@ -1,8 +1,13 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-flask>=3.0.0
+# PyTorch (純 CPU 模式，支援 NCNN 導出與底層執行)
+torch
+torchvision
+
+# 核心套件 (NCNN ARM 硬體極限加速)
 ultralytics>=8.3.0
-onnxruntime>=1.16.0
+ncnn
+flask>=3.0.0
 opencv-python-headless
 numpy
 pillow

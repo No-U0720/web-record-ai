@@ -10,7 +10,12 @@ app = Flask(__name__)
 
 # ===== 全域變數與模型初始化 =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "rubber_band_color_best.onnx")
+# 優先載入樹莓派 ARM 極限加速之 NCNN 模型
+MODEL_PATH = os.path.join(BASE_DIR, "rubber_band_color_best_ncnn_model")
+if not os.path.exists(MODEL_PATH):
+    MODEL_PATH = os.path.join(BASE_DIR, "best_ncnn_model")
+if not os.path.exists(MODEL_PATH):
+    MODEL_PATH = os.path.join(BASE_DIR, "rubber_band_color_best.onnx")
 if not os.path.exists(MODEL_PATH):
     MODEL_PATH = os.path.join(BASE_DIR, "best.onnx")
 if not os.path.exists(MODEL_PATH):
@@ -18,7 +23,7 @@ if not os.path.exists(MODEL_PATH):
 if not os.path.exists(MODEL_PATH):
     MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
-print(f"📦 Web Record 正在載入 AI 模型: {MODEL_PATH}")
+print(f"📦 Web Record 正在載入 AI 模型 (NCNN / ONNX): {MODEL_PATH}")
 model = YOLO(MODEL_PATH)
 
 # 相機與視訊狀態

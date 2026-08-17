@@ -1,0 +1,22 @@
+description: Ultralytics rubber_band_color_best model trained on /Users/john/程式/dataset_record/data.yaml
+author: Ultralytics
+date: '2026-08-17T14:08:39.975434+08:00'
+version: 8.4.115
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 480
+- 480
+names:
+  0: Red
+  1: Yellow
+  2: Green
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false
